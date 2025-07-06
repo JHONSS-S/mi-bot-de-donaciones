@@ -1,4 +1,4 @@
-# telegram_bot.py - VERSIÓN FINAL COMPATIBLE CON NUBES (Railway, etc.)
+# telegram_bot.py - VERSIÓN FINAL (CORRECCIÓN DE SCOPES)
 
 import os
 import base64
@@ -16,11 +16,14 @@ from google.oauth2.service_account import Credentials
 # --- CONFIGURACIÓN DE LOGGING Y APIs ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- TUS CLAVES Y IDs (leídas desde el entorno) ---
-# En lugar de poner las claves aquí, el bot las leerá de las variables de entorno de la nube.
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_DE_TELEGRAM_POR_DEFECTO_SI_FALLA")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "TU_CLAVE_DE_OPENAI_POR_DEFECTO_SI_FALLA")
-SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "EL_ID_DE_TU_HOJA_DE_GOOGLE_SI_FALLA")
+# --- TUS CLAVES Y IDs ---
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "") 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+# --- ¡LÍNEA CORREGIDA! AÑADIMOS DE VUELTA LA VARIABLE SCOPES ---
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file']
+
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 SHEET_NAME = os.environ.get("SHEET_NAME", "Donaciones")
 
 # --- HERRAMIENTA PERSONALIZADA (Sin cambios) ---
@@ -55,25 +58,23 @@ def donation_form_analysis_tool(image_path: str) -> str:
 form_extractor_agent = Agent(role='Especialista en Formularios', goal='Extraer con precisión los campos de un formulario.', backstory='Eres un asistente administrativo experto en leer formularios.', tools=[donation_form_analysis_tool], verbose=True)
 extraction_task = Task(description='Analiza la imagen del formulario. La ruta es: {image_path}', expected_output='Un string JSON con los datos.', agent=form_extractor_agent)
 
-# --- NUEVO: Función auxiliar para conectarse a Google Sheets de forma segura ---
+# --- FUNCIÓN AUXILIAR PARA GOOGLE SHEETS (Sin cambios) ---
 def get_gspread_client():
     """Crea el cliente de Google Sheets a partir de una variable de entorno."""
     creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
     if not creds_json_str:
-        # Si la variable no existe, intentará buscar el archivo localmente (para pruebas en tu Mac)
         if os.path.exists('credentials.json'):
              creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
              return gspread.authorize(creds)
         else:
             raise ValueError("No se encontró 'credentials.json' ni la variable de entorno 'GOOGLE_CREDS_JSON'.")
 
-    # Si la variable de entorno SÍ existe (en la nube), la usa
     creds_dict = json.loads(creds_json_str)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
     return client
 
-# --- FUNCIONES DEL BOT (MODIFICADAS para usar la nueva función de conexión) ---
+# --- FUNCIONES DEL BOT (Sin cambios) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía un mensaje de bienvenida."""
     await update.message.reply_text('¡Hola! Envíame la foto de un formulario o usa /reporte para ver los totales.')
@@ -93,7 +94,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fecha_extraida = data.get('fecha', 'N/A')
         fecha_para_guardar = fecha_extraida if fecha_extraida and fecha_extraida != 'N/A' else datetime.now().strftime('%Y-%m-%d')
         
-        client = get_gspread_client() # <-- MODIFICADO
+        client = get_gspread_client()
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
         
         new_row = [fecha_para_guardar, data.get('transaccion_tipo', 'N/A'), data.get('donacion_mundial', 0.0), data.get('donacion_local', 0.0), data.get('total_donado', 0.0)]
@@ -118,7 +119,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     try:
-        client = get_gspread_client() # <-- MODIFICADO
+        client = get_gspread_client()
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
         registros = sheet.get_all_records()
 
@@ -145,6 +146,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Inicia el bot de Telegram."""
     print("Iniciando bot...")
+    
+    if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, SPREADSHEET_ID, os.environ.get('GOOGLE_CREDS_JSON')]):
+        raise ValueError("Una o más variables de entorno requeridas no están configuradas.")
+        
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
@@ -152,7 +157,7 @@ def main():
     application.add_handler(CommandHandler("reporte", reporte))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    print("🚀 El bot de donaciones (v3 en la nube) está en línea...")
+    print("🚀 El bot de donaciones (v4 simplificado) está en línea...")
     application.run_polling()
 
 if __name__ == '__main__':
