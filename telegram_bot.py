@@ -1,12 +1,12 @@
-# telegram_bot.py - VERSIÓN 3 CON MENÚ DE REPORTES INTERACTIVO
+# telegram_bot.py - VERSIÓN FINAL COMPATIBLE CON NUBES (Railway, etc.)
 
 import os
 import base64
 import json
 import logging
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup # Se importa para los botones
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler # Se importa para manejar botones
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from crewai import Agent, Task, Crew, Process
 from crewai.tools import tool 
 from openai import OpenAI
@@ -16,21 +16,18 @@ from google.oauth2.service_account import Credentials
 # --- CONFIGURACIÓN DE LOGGING Y APIs ---
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- TUS CLAVES Y IDs ---
-TELEGRAM_TOKEN = "8087796067:AAG9jMlLOSvgcxOIXwFQ4av8QmLLmF0Wx4E" 
-os.environ["OPENAI_API_KEY"] = ""
-
-# Google Sheets
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive.file']
-CREDS_FILE = 'credentials.json' 
-SPREADSHEET_ID = '18SLDI7zoQWLFFoPAKtMCvA7Bw8p8NRzW9uz9ol05-AY'
-SHEET_NAME = 'Donaciones'
+# --- TUS CLAVES Y IDs (leídas desde el entorno) ---
+# En lugar de poner las claves aquí, el bot las leerá de las variables de entorno de la nube.
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "TU_TOKEN_DE_TELEGRAM_POR_DEFECTO_SI_FALLA")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "TU_CLAVE_DE_OPENAI_POR_DEFECTO_SI_FALLA")
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "EL_ID_DE_TU_HOJA_DE_GOOGLE_SI_FALLA")
+SHEET_NAME = os.environ.get("SHEET_NAME", "Donaciones")
 
 # --- HERRAMIENTA PERSONALIZADA (Sin cambios) ---
 @tool("Herramienta de Análisis de Formularios de Donación")
 def donation_form_analysis_tool(image_path: str) -> str:
     """Analiza una imagen de un formulario de donación y extrae campos específicos."""
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    client = OpenAI(api_key=OPENAI_API_KEY)
     try:
         with open(image_path, "rb") as image_file:
             base64_image = base64.b64encode(image_file.read()).decode('utf-8')
@@ -58,10 +55,27 @@ def donation_form_analysis_tool(image_path: str) -> str:
 form_extractor_agent = Agent(role='Especialista en Formularios', goal='Extraer con precisión los campos de un formulario.', backstory='Eres un asistente administrativo experto en leer formularios.', tools=[donation_form_analysis_tool], verbose=True)
 extraction_task = Task(description='Analiza la imagen del formulario. La ruta es: {image_path}', expected_output='Un string JSON con los datos.', agent=form_extractor_agent)
 
-# --- FUNCIONES DEL BOT ---
+# --- NUEVO: Función auxiliar para conectarse a Google Sheets de forma segura ---
+def get_gspread_client():
+    """Crea el cliente de Google Sheets a partir de una variable de entorno."""
+    creds_json_str = os.environ.get('GOOGLE_CREDS_JSON')
+    if not creds_json_str:
+        # Si la variable no existe, intentará buscar el archivo localmente (para pruebas en tu Mac)
+        if os.path.exists('credentials.json'):
+             creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
+             return gspread.authorize(creds)
+        else:
+            raise ValueError("No se encontró 'credentials.json' ni la variable de entorno 'GOOGLE_CREDS_JSON'.")
+
+    # Si la variable de entorno SÍ existe (en la nube), la usa
+    creds_dict = json.loads(creds_json_str)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    return client
+
+# --- FUNCIONES DEL BOT (MODIFICADAS para usar la nueva función de conexión) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Envía un mensaje de bienvenida."""
-    # Mensaje de bienvenida modificado para incluir el nuevo comando de reportes
     await update.message.reply_text('¡Hola! Envíame la foto de un formulario o usa /reporte para ver los totales.')
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,13 +89,16 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         donation_crew = Crew(agents=[form_extractor_agent], tasks=[extraction_task], process=Process.sequential)
         result = donation_crew.kickoff(inputs={'image_path': temp_photo_path})
         data = json.loads(result.raw)
+        
         fecha_extraida = data.get('fecha', 'N/A')
         fecha_para_guardar = fecha_extraida if fecha_extraida and fecha_extraida != 'N/A' else datetime.now().strftime('%Y-%m-%d')
-        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-        client = gspread.authorize(creds)
+        
+        client = get_gspread_client() # <-- MODIFICADO
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+        
         new_row = [fecha_para_guardar, data.get('transaccion_tipo', 'N/A'), data.get('donacion_mundial', 0.0), data.get('donacion_local', 0.0), data.get('total_donado', 0.0)]
         sheet.append_row(new_row)
+        
         await update.message.reply_text(f"✅ ¡Éxito! Formulario guardado con fecha {fecha_para_guardar}. Total: ${data.get('total_donado', 0.0)}")
     except Exception as e:
         logging.error(f"Error procesando el formulario: {e}")
@@ -90,42 +107,27 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(temp_photo_path):
             os.remove(temp_photo_path)
 
-# --- NUEVA FUNCIÓN para el comando /reporte que muestra los botones ---
 async def reporte(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Muestra un menú de botones para elegir el tipo de reporte."""
-    keyboard = [
-        [InlineKeyboardButton("Total Obra Mundial", callback_data='total_mundial')],
-        [InlineKeyboardButton("Total Congregación", callback_data='total_local')],
-        [InlineKeyboardButton("Gran Total (Ambos)", callback_data='gran_total')],
-    ]
+    keyboard = [[InlineKeyboardButton("Total Obra Mundial", callback_data='total_mundial')], [InlineKeyboardButton("Total Congregación", callback_data='total_local')], [InlineKeyboardButton("Gran Total (Ambos)", callback_data='gran_total')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text('Por favor, elige el reporte que deseas:', reply_markup=reply_markup)
 
-# --- NUEVA FUNCIÓN que maneja los clics en los botones ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Procesa la opción del menú de botones."""
     query = update.callback_query
-    await query.answer() # Responde al clic para que el botón deje de cargar
-
+    await query.answer()
     try:
-        # 1. Conectarse a la hoja de cálculo
-        creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-        client = gspread.authorize(creds)
+        client = get_gspread_client() # <-- MODIFICADO
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
         registros = sheet.get_all_records()
 
-        # 2. Calcular los totales
-        total_mundial = 0.0
-        total_local = 0.0
-        gran_total = 0.0
-
+        total_mundial, total_local, gran_total = 0.0, 0.0, 0.0
         for fila in registros:
-            # Usamos .get() para evitar errores si la columna no existe en una fila
             total_mundial += float(fila.get('Donación Mundial', 0))
             total_local += float(fila.get('Donación Local', 0))
             gran_total += float(fila.get('Total', 0))
 
-        # 3. Preparar la respuesta según el botón presionado
         opcion = query.data
         mensaje = ""
         if opcion == 'total_mundial':
@@ -135,26 +137,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif opcion == 'gran_total':
             mensaje = f"El Gran Total de todas las donaciones es: ${gran_total:,.2f}"
         
-        # Edita el mensaje original para mostrar el resultado
         await query.edit_message_text(text=mensaje)
-
     except Exception as e:
         logging.error(f"Error generando reporte: {e}")
         await query.edit_message_text(text="❌ Hubo un error al generar el reporte.")
 
 def main():
     """Inicia el bot de Telegram."""
+    print("Iniciando bot...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Manejadores para start y fotos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    
-    # --- MANEJADORES NUEVOS PARA LOS REPORTES ---
     application.add_handler(CommandHandler("reporte", reporte))
     application.add_handler(CallbackQueryHandler(button_handler))
     
-    print("🚀 El bot de donaciones (v3 con reportes) está en línea...")
+    print("🚀 El bot de donaciones (v3 en la nube) está en línea...")
     application.run_polling()
 
 if __name__ == '__main__':
